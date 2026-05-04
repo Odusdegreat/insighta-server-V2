@@ -3,6 +3,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Profile } from './profile.schema';
 import { randomUUID } from 'crypto';
+import { CacheService } from './cache.service';
+import { QueryNormalizerService } from './query-normalizer.service';
 
 export interface ProfileFilters {
   gender?: string;
@@ -28,7 +30,7 @@ function getAgeGroup(age: number): string {
   return 'senior';
 }
 
-const COUNTRY_MAP: Record<string, string> = {
+export const COUNTRY_MAP: Record<string, string> = {
   AF: 'Afghanistan', AL: 'Albania', DZ: 'Algeria', AD: 'Andorra', AO: 'Angola',
   AR: 'Argentina', AU: 'Australia', AT: 'Austria', BD: 'Bangladesh', BE: 'Belgium',
   BR: 'Brazil', CA: 'Canada', CL: 'Chile', CN: 'China', CO: 'Colombia',
@@ -48,6 +50,8 @@ export class ProfilesService {
   constructor(
     @InjectModel(Profile.name)
     private readonly profileModel: Model<Profile>,
+    private readonly cacheService: CacheService,
+    private readonly queryNormalizer: QueryNormalizerService,
   ) {}
 
   private buildFilter(filters: ProfileFilters): any {
@@ -146,6 +150,15 @@ export class ProfilesService {
 
     const filter = this.buildFilter(filters);
 
+    // Generate normalized cache key from filters and pagination
+    const cacheKey = `profiles:${this.queryNormalizer.normalize(filters)}:${sortBy}:${order}:${page}:${limit}`;
+
+    // Check cache first
+    const cached = this.cacheService.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const [data, total] = await Promise.all([
       this.profileModel
         .find(filter)
@@ -158,7 +171,7 @@ export class ProfilesService {
 
     const totalPages = Math.ceil(total / limit) || 1;
 
-    return {
+    const result = {
       status: 'success',
       page,
       limit,
@@ -167,6 +180,11 @@ export class ProfilesService {
       links: this.buildLinks(basePath, page, limit, totalPages, extraParams),
       data,
     };
+
+    // Cache the result
+    this.cacheService.set(cacheKey, result);
+
+    return result;
   }
 
   async createProfileFromName(name: string): Promise<Profile> {

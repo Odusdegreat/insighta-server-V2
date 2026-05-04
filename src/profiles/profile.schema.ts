@@ -35,3 +35,12 @@ export class Profile extends Document {
 }
 
 export const ProfileSchema = SchemaFactory.createForClass(Profile);
+
+// Indexes for query performance (common filter combinations)
+ProfileSchema.index({ gender: 1, age: 1 });
+ProfileSchema.index({ country_id: 1, age: 1 });
+ProfileSchema.index({ age_group: 1, gender: 1 });
+ProfileSchema.index({ gender: 1, country_id: 1 });
+ProfileSchema.index({ age: 1 });
+ProfileSchema.index({ name: 1 }, { unique: true }); // For idempotency check
+

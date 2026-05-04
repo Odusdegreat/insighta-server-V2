@@ -4,6 +4,9 @@ import { Profile, ProfileSchema } from './profile.schema';
 import { ProfilesService } from './profiles.service';
 import { ProfilesController } from './profiles.controller';
 import { SeederService } from './seeder.service';
+import { CacheService } from './cache.service';
+import { QueryNormalizerService } from './query-normalizer.service';
+import { CsvIngestionService } from './csv-ingestion.service';
 import { AuthModule } from '../auth/auth.module';
 
 @Module({
@@ -12,7 +15,7 @@ import { AuthModule } from '../auth/auth.module';
     AuthModule,
   ],
   controllers: [ProfilesController],
-  providers: [ProfilesService, SeederService],
+  providers: [ProfilesService, SeederService, CacheService, QueryNormalizerService, CsvIngestionService],
 })
 export class ProfilesModule implements OnModuleInit {
   constructor(private readonly seederService: SeederService) {}

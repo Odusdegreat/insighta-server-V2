@@ -11,13 +11,20 @@ import {
   UseGuards,
   Req,
   Res,
+  UploadedFile,
+  UseInterceptors,
+  ParseFilePipe,
+  FileTypeValidator,
 } from '@nestjs/common';
-import { ApiQuery, ApiOperation, ApiBody, ApiHeader, ApiTags, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
+import { ApiQuery, ApiOperation, ApiBody, ApiHeader, ApiTags, ApiBearerAuth, ApiResponse, ApiConsumes } from '@nestjs/swagger';
 import { ProfilesService, ProfileFilters, PaginationAndSort } from './profiles.service';
+import { CsvIngestionService } from './csv-ingestion.service';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { RolesGuard, Roles } from '../guards/roles.guard';
 import { ApiVersionGuard } from '../guards/api-version.guard';
 import type { Request, Response } from 'express';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { Readable } from 'stream';
 
 @ApiTags('Profiles')
 @ApiBearerAuth()
@@ -25,7 +32,10 @@ import type { Request, Response } from 'express';
 @UseGuards(ApiVersionGuard, JwtAuthGuard, RolesGuard)
 @ApiHeader({ name: 'X-API-Version', required: true, description: 'API version (must be 1)' })
 export class ProfilesController {
-  constructor(private readonly profilesService: ProfilesService) {}
+  constructor(
+    private readonly profilesService: ProfilesService,
+    private readonly csvIngestionService: CsvIngestionService,
+  ) {}
 
   @Post()
   @Roles('admin')
@@ -279,5 +289,38 @@ export class ProfilesController {
       }
       throw new HttpException({ status: 'error', message: e.message || 'Server failure' }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
+  }
+
+  @Post('upload')
+  @Roles('admin')
+  @ApiOperation({ summary: 'Upload CSV file with profile data (admin only)' })
+  @ApiResponse({ status: 201, description: 'CSV processed successfully.' })
+  @ApiResponse({ status: 400, description: 'Invalid file.' })
+  @ApiResponse({ status: 403, description: 'Forbidden.' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    description: 'CSV file with profile data',
+    schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } },
+  })
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadCSV(
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [new FileTypeValidator({ fileType: 'text/csv' })],
+      }),
+    )
+    file: Express.Multer.File,
+  ) {
+    if (!file) {
+      throw new HttpException(
+        { status: 'error', message: 'No file uploaded' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const stream = Readable.from(file.buffer);
+    const result = await this.csvIngestionService.processCSVStream(stream);
+
+    return result;
   }
 }
