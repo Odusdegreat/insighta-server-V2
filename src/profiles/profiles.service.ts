@@ -1,7 +1,7 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, SelectQueryBuilder } from 'typeorm';
-import { Profile } from './profile.entity';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Profile } from './profile.schema';
 import { randomUUID } from 'crypto';
 
 export interface ProfileFilters {
@@ -21,7 +21,6 @@ export interface PaginationAndSort {
   order?: 'asc' | 'desc';
 }
 
-// Helper to determine age_group from age
 function getAgeGroup(age: number): string {
   if (age < 13) return 'child';
   if (age < 20) return 'teenager';
@@ -29,7 +28,6 @@ function getAgeGroup(age: number): string {
   return 'senior';
 }
 
-// Country code to name mapping
 const COUNTRY_MAP: Record<string, string> = {
   AF: 'Afghanistan', AL: 'Albania', DZ: 'Algeria', AD: 'Andorra', AO: 'Angola',
   AR: 'Argentina', AU: 'Australia', AT: 'Austria', BD: 'Bangladesh', BE: 'Belgium',
@@ -48,60 +46,41 @@ const COUNTRY_MAP: Record<string, string> = {
 @Injectable()
 export class ProfilesService {
   constructor(
-    @InjectRepository(Profile)
-    private readonly profileRepository: Repository<Profile>,
+    @InjectModel(Profile.name)
+    private readonly profileModel: Model<Profile>,
   ) {}
 
-  private applyFilters(
-    queryBuilder: SelectQueryBuilder<Profile>,
-    filters: ProfileFilters,
-  ) {
+  private buildFilter(filters: ProfileFilters): any {
+    const filter: any = {};
+
     if (filters.gender) {
-      queryBuilder.andWhere('profile.gender = :gender', {
-        gender: filters.gender.toLowerCase(),
-      });
+      filter.gender = filters.gender.toLowerCase();
     }
     if (filters.age_group) {
-      queryBuilder.andWhere('profile.age_group = :age_group', {
-        age_group: filters.age_group.toLowerCase(),
-      });
+      filter.age_group = filters.age_group.toLowerCase();
     }
     if (filters.country_id) {
       if (filters.country_id.length > 2) {
-        queryBuilder.andWhere('LOWER(profile.country_name) = LOWER(:country_name)', {
-          country_name: filters.country_id,
-        });
+        filter.country_name = new RegExp(`^${filters.country_id}$`, 'i');
       } else {
-        queryBuilder.andWhere('profile.country_id = :country_id', {
-          country_id: filters.country_id.toUpperCase(),
-        });
+        filter.country_id = filters.country_id.toUpperCase();
       }
     }
-    if (filters.min_age !== undefined) {
-      queryBuilder.andWhere('profile.age >= :min_age', {
-        min_age: filters.min_age,
-      });
-    }
-    if (filters.max_age !== undefined) {
-      queryBuilder.andWhere('profile.age <= :max_age', {
-        max_age: filters.max_age,
-      });
+    if (filters.min_age !== undefined || filters.max_age !== undefined) {
+      filter.age = {};
+      if (filters.min_age !== undefined) filter.age.$gte = filters.min_age;
+      if (filters.max_age !== undefined) filter.age.$lte = filters.max_age;
     }
     if (filters.min_gender_probability !== undefined) {
-      queryBuilder.andWhere(
-        'profile.gender_probability >= :min_gender_probability',
-        { min_gender_probability: filters.min_gender_probability },
-      );
+      filter.gender_probability = { $gte: filters.min_gender_probability };
     }
     if (filters.min_country_probability !== undefined) {
-      queryBuilder.andWhere(
-        'profile.country_probability >= :min_country_probability',
-        { min_country_probability: filters.min_country_probability },
-      );
+      filter.country_probability = { $gte: filters.min_country_probability };
     }
+
+    return filter;
   }
 
-  // Build pagination links
   private buildLinks(
     basePath: string,
     page: number,
@@ -141,15 +120,15 @@ export class ProfilesService {
       return copy;
     });
 
-    return await this.profileRepository.save(mappedItems, { chunk: 100 });
+    return await this.profileModel.insertMany(mappedItems);
   }
 
   async deleteAll() {
-    await this.profileRepository.clear();
+    await this.profileModel.deleteMany({});
   }
 
   async findById(id: string): Promise<Profile | null> {
-    return this.profileRepository.findOne({ where: { id } });
+    return this.profileModel.findOne({ id });
   }
 
   async findAll(
@@ -161,19 +140,22 @@ export class ProfilesService {
     const page = pagination.page || 1;
     const limit = Math.min(pagination.limit || 10, 100);
     const skip = (page - 1) * limit;
-    
-    // Default sorts
+
     const sortBy = pagination.sort_by || 'created_at';
-    const order = (pagination.order || 'desc').toUpperCase() as 'ASC' | 'DESC';
+    const order = (pagination.order || 'desc') === 'asc' ? 1 : -1;
 
-    const queryBuilder = this.profileRepository.createQueryBuilder('profile');
+    const filter = this.buildFilter(filters);
 
-    this.applyFilters(queryBuilder, filters);
+    const [data, total] = await Promise.all([
+      this.profileModel
+        .find(filter)
+        .sort({ [sortBy]: order })
+        .skip(skip)
+        .limit(limit)
+        .exec(),
+      this.profileModel.countDocuments(filter),
+    ]);
 
-    queryBuilder.orderBy(`profile.${sortBy}`, order);
-    queryBuilder.skip(skip).take(limit);
-
-    const [data, total] = await queryBuilder.getManyAndCount();
     const totalPages = Math.ceil(total / limit) || 1;
 
     return {
@@ -187,17 +169,13 @@ export class ProfilesService {
     };
   }
 
-  // Create a profile by calling external APIs (Stage 1 logic)
   async createProfileFromName(name: string): Promise<Profile> {
-    // Call Genderize API
     const genderRes = await fetch(`https://api.genderize.io?name=${encodeURIComponent(name.split(' ')[0])}`);
     const genderData = await genderRes.json();
 
-    // Call Agify API
     const ageRes = await fetch(`https://api.agify.io?name=${encodeURIComponent(name.split(' ')[0])}`);
     const ageData = await ageRes.json();
 
-    // Call Nationalize API
     const nationRes = await fetch(`https://api.nationalize.io?name=${encodeURIComponent(name.split(' ')[0])}`);
     const nationData = await nationRes.json();
 
@@ -206,13 +184,12 @@ export class ProfilesService {
     const age = ageData.age || 0;
     const ageGroup = getAgeGroup(age);
 
-    // Get the most likely country
     const topCountry = nationData.country?.[0] || {};
     const countryId = topCountry.country_id || 'XX';
     const countryProbability = topCountry.probability || 0;
     const countryName = COUNTRY_MAP[countryId] || countryId;
 
-    const profile = this.profileRepository.create({
+    return await this.profileModel.create({
       id: randomUUID(),
       name,
       gender,
@@ -223,25 +200,22 @@ export class ProfilesService {
       country_name: countryName,
       country_probability: countryProbability,
     });
-
-    return await this.profileRepository.save(profile);
   }
 
-  // Export profiles as CSV
   async exportCSV(
     filters: ProfileFilters,
     sortConfig?: { sort_by?: string; order?: string },
   ): Promise<string> {
     const sortBy = sortConfig?.sort_by || 'created_at';
-    const order = (sortConfig?.order || 'desc').toUpperCase() as 'ASC' | 'DESC';
+    const order = (sortConfig?.order || 'desc') === 'asc' ? 1 : -1;
 
-    const queryBuilder = this.profileRepository.createQueryBuilder('profile');
-    this.applyFilters(queryBuilder, filters);
-    queryBuilder.orderBy(`profile.${sortBy}`, order);
+    const filter = this.buildFilter(filters);
 
-    const profiles = await queryBuilder.getMany();
+    const profiles = await this.profileModel
+      .find(filter)
+      .sort({ [sortBy]: order })
+      .exec();
 
-    // Build CSV manually
     const headers = [
       'id', 'name', 'gender', 'gender_probability', 'age',
       'age_group', 'country_id', 'country_name', 'country_probability', 'created_at',
@@ -278,7 +252,6 @@ export class ProfilesService {
 
     let matchedSomething = false;
 
-    // GENDER — use word boundaries to cleanly separate male/female/males/females
     if (/\bfemales?\b/.test(lowerQ) || /\b(women|woman|girl|girls)\b/.test(lowerQ)) {
       filters.gender = 'female';
       matchedSomething = true;
@@ -287,7 +260,6 @@ export class ProfilesService {
       matchedSomething = true;
     }
 
-    // AGE GROUPS & KEYWORDS
     if (lowerQ.includes('young')) {
       filters.min_age = 16;
       filters.max_age = 24;
@@ -310,7 +282,6 @@ export class ProfilesService {
       matchedSomething = true;
     }
 
-    // MIN / MAX AGE
     const aboveMatch = lowerQ.match(/(?:above|over|older than|greater than)\s+(\d+)/);
     if (aboveMatch) {
       filters.min_age = parseInt(aboveMatch[1], 10);
@@ -323,7 +294,6 @@ export class ProfilesService {
       matchedSomething = true;
     }
 
-    // Between pattern: "between X and Y"
     const betweenMatch = lowerQ.match(/between\s+(\d+)\s+and\s+(\d+)/);
     if (betweenMatch) {
       filters.min_age = parseInt(betweenMatch[1], 10);
@@ -331,7 +301,6 @@ export class ProfilesService {
       matchedSomething = true;
     }
 
-    // COUNTRY
     const fromMatch = lowerQ.match(/from\s+([a-z\s]+?)(\s+(above|below|under|over|older|younger|between).*)?$/);
     if (fromMatch) {
       const parsedCountry = fromMatch[1].trim();
@@ -341,7 +310,6 @@ export class ProfilesService {
       }
     }
 
-    // Also detect "in <country>" pattern
     if (!filters.country_id) {
       const inMatch = lowerQ.match(/\bin\s+([a-z\s]+?)(\s+(above|below|under|over|older|younger|between).*)?$/);
       if (inMatch) {
@@ -353,7 +321,6 @@ export class ProfilesService {
       }
     }
 
-    // Standalone country code or demonym fallback
     if (!filters.country_id) {
       if (/\b(nigeria|nigerians?|ng)\b/.test(lowerQ)) { filters.country_id = 'NG'; matchedSomething = true; }
       else if (/\b(united states|americans?|usa?)\b/.test(lowerQ)) { filters.country_id = 'US'; matchedSomething = true; }
@@ -363,7 +330,6 @@ export class ProfilesService {
       else if (/\b(south africa|south africans?|za)\b/.test(lowerQ)) { filters.country_id = 'ZA'; matchedSomething = true; }
       else if (/\b(india|indians?|in)\b/.test(lowerQ)) { filters.country_id = 'IN'; matchedSomething = true; }
       else {
-        // Dynamic fallback loop against the COUNTRY_MAP
         for (const [code, name] of Object.entries(COUNTRY_MAP)) {
           if (new RegExp(`\\b${name.toLowerCase()}\\b`).test(lowerQ) || new RegExp(`\\b${code.toLowerCase()}\\b`).test(lowerQ)) {
             filters.country_id = code;

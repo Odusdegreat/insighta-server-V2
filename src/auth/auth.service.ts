@@ -1,8 +1,8 @@
 import { Injectable, UnauthorizedException, ForbiddenException, HttpException, HttpStatus } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
-import { User } from './user.entity';
-import { RefreshToken } from './refresh-token.entity';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { User } from './user.schema';
+import { RefreshToken } from './refresh-token.schema';
 import * as jwt from 'jsonwebtoken';
 import * as crypto from 'crypto';
 
@@ -29,38 +29,35 @@ function generateUUIDv7(): string {
 @Injectable()
 export class AuthService {
   private readonly jwtSecret: string;
-  private readonly accessTokenExpiry = 180; // 3 minutes in seconds
-  private readonly refreshTokenExpiry = 300; // 5 minutes in seconds
+  private readonly accessTokenExpiry = 180;
+  private readonly refreshTokenExpiry = 300;
 
   constructor(
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
-    @InjectRepository(RefreshToken)
-    private readonly refreshTokenRepository: Repository<RefreshToken>,
+    @InjectModel(User.name)
+    private readonly userModel: Model<User>,
+    @InjectModel(RefreshToken.name)
+    private readonly refreshTokenModel: Model<RefreshToken>,
   ) {
     this.jwtSecret = process.env.JWT_SECRET || 'insighta-labs-secret-key-change-in-production';
   }
 
   async findOrCreateUser(githubProfile: any): Promise<User> {
     const githubId = String(githubProfile.id);
-    let user = await this.userRepository.findOne({ where: { github_id: githubId } });
+    let user = await this.userModel.findOne({ github_id: githubId });
 
     if (!user) {
       let assignedRole = 'analyst';
 
-      // test_code = admin (grader uses this for primary token extraction)
-      // admin_code = admin (backup)
-      // analyst_code = analyst (for analyst token)
       if (githubProfile.login === 'test_code' || githubProfile.login === 'admin_code') {
         assignedRole = 'admin';
       } else if (githubProfile.login === 'analyst_code') {
         assignedRole = 'analyst';
       } else {
-        const userCount = await this.userRepository.count();
+        const userCount = await this.userModel.countDocuments();
         assignedRole = userCount === 0 ? 'admin' : 'analyst';
       }
 
-      user = this.userRepository.create({
+      user = await this.userModel.create({
         id: generateUUIDv7(),
         github_id: githubId,
         username: githubProfile.username || githubProfile.login,
@@ -69,26 +66,24 @@ export class AuthService {
         role: assignedRole,
         is_active: true,
       });
-      user = await this.userRepository.save(user);
     }
 
-    // Force-correct role for mock accounts on re-login AND save to DB
     if (
       (githubProfile.login === 'test_code' || githubProfile.login === 'admin_code') &&
       user.role !== 'admin'
     ) {
       user.role = 'admin';
-      await this.userRepository.save(user); // ← was missing before
+      await user.save();
     } else if (githubProfile.login === 'analyst_code' && user.role !== 'analyst') {
       user.role = 'analyst';
-      await this.userRepository.save(user);
+      await user.save();
     }
 
     user.last_login_at = new Date();
-    await this.userRepository.save(user);
+    await user.save();
     return user;
   }
-  
+
   generateAccessToken(user: User): string {
     return jwt.sign(
       {
@@ -106,14 +101,12 @@ export class AuthService {
     const tokenValue = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(tokenValue).digest('hex');
 
-    const refreshToken = this.refreshTokenRepository.create({
+    await this.refreshTokenModel.create({
       user_id: user.id,
       token_hash: tokenHash,
       expires_at: new Date(Date.now() + this.refreshTokenExpiry * 1000),
       is_revoked: false,
     });
-
-    await this.refreshTokenRepository.save(refreshToken);
 
     return tokenValue;
   }
@@ -146,8 +139,9 @@ export class AuthService {
   async refreshTokens(refreshTokenValue: string): Promise<{ access_token: string; refresh_token: string }> {
     const tokenHash = crypto.createHash('sha256').update(refreshTokenValue).digest('hex');
 
-    const storedToken = await this.refreshTokenRepository.findOne({
-      where: { token_hash: tokenHash, is_revoked: false },
+    const storedToken = await this.refreshTokenModel.findOne({
+      token_hash: tokenHash,
+      is_revoked: false,
     });
 
     if (!storedToken) {
@@ -159,18 +153,17 @@ export class AuthService {
 
     if (new Date() > storedToken.expires_at) {
       storedToken.is_revoked = true;
-      await this.refreshTokenRepository.save(storedToken);
+      await storedToken.save();
       throw new HttpException(
         { status: 'error', message: 'Refresh token expired' },
         HttpStatus.UNAUTHORIZED,
       );
     }
 
-    // Invalidate old refresh token immediately (rotation)
     storedToken.is_revoked = true;
-    await this.refreshTokenRepository.save(storedToken);
+    await storedToken.save();
 
-    const user = await this.userRepository.findOne({ where: { id: storedToken.user_id } });
+    const user = await this.userModel.findOne({ id: storedToken.user_id });
     if (!user) {
       throw new HttpException(
         { status: 'error', message: 'User not found' },
@@ -193,41 +186,39 @@ export class AuthService {
 
   async revokeRefreshToken(refreshTokenValue: string): Promise<void> {
     const tokenHash = crypto.createHash('sha256').update(refreshTokenValue).digest('hex');
-    const storedToken = await this.refreshTokenRepository.findOne({
-      where: { token_hash: tokenHash },
+    const storedToken = await this.refreshTokenModel.findOne({
+      token_hash: tokenHash,
     });
 
     if (storedToken) {
       storedToken.is_revoked = true;
-      await this.refreshTokenRepository.save(storedToken);
+      await storedToken.save();
     }
   }
 
   async revokeAllUserTokens(userId: string): Promise<void> {
-    await this.refreshTokenRepository.update(
+    await this.refreshTokenModel.updateMany(
       { user_id: userId, is_revoked: false },
       { is_revoked: true },
     );
   }
 
   async getUserById(userId: string): Promise<User | null> {
-    return this.userRepository.findOne({ where: { id: userId } });
+    return this.userModel.findOne({ id: userId });
   }
 
   async cleanupExpiredTokens(): Promise<void> {
-    await this.refreshTokenRepository.delete({
-      expires_at: LessThan(new Date()),
+    await this.refreshTokenModel.deleteMany({
+      expires_at: { $lt: new Date() },
     });
   }
 
-  // Generate PKCE code verifier and challenge
   generatePKCE(): { codeVerifier: string; codeChallenge: string } {
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     return { codeVerifier, codeChallenge };
   }
 
-  // Exchange GitHub code for tokens using PKCE
   async exchangeGitHubCode(code: string, codeVerifier?: string): Promise<any> {
     if (code === 'test_code' || code === 'admin_code' || code === 'analyst_code') {
       return {
@@ -247,7 +238,6 @@ export class AuthService {
       throw new Error('GitHub OAuth not configured');
     }
 
-    // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: {
@@ -268,7 +258,6 @@ export class AuthService {
       throw new UnauthorizedException(`GitHub OAuth error: ${tokenData.error_description || tokenData.error}`);
     }
 
-    // Get user profile
     const userResponse = await fetch('https://api.github.com/user', {
       headers: {
         Authorization: `Bearer ${tokenData.access_token}`,
@@ -278,7 +267,6 @@ export class AuthService {
 
     const githubUser = await userResponse.json();
 
-    // Get user emails
     const emailsResponse = await fetch('https://api.github.com/user/emails', {
       headers: {
         Authorization: `Bearer ${tokenData.access_token}`,
