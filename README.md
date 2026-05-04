@@ -1,8 +1,10 @@
-# Insighta Labs+ Platform (Stage 3)
+# Insighta Labs+ Platform (Stage 4B)
 
-This repository contains the backend for the Insighta Labs demographic intelligence project. In Stage 3, the Profile Intelligence Service has been upgraded into a fully secure, multi-interface platform supporting both web browsers and CLI tools.
+This repository contains the backend for the Insighta Labs demographic intelligence project. In Stage 3, the Profile Intelligence Service was upgraded into a fully secure, multi-interface platform supporting both web browsers and CLI tools.
 
 **Database:** MongoDB with Mongoose ODM (migrated from PostgreSQL/TypeORM)
+
+Stage 4B implements system optimization and large-scale data ingestion to handle increased load (1M+ records, thousands of queries/minute).
 
 ## Key Features & Stage 3 Updates
 
@@ -28,6 +30,7 @@ This repository contains the backend for the Insighta Labs demographic intellige
 - **API Versioning**: All profile endpoints strictly require the `X-API-Version: 1` header, enforced by an `ApiVersionGuard`.
 - **HATEOAS Pagination**: Responses now include a standard `links` object (`self`, `next`, `prev`) dynamically generating query URLs for easier frontend and CLI pagination.
 - **CSV Export**: A dedicated endpoint (`/api/profiles/export`) allows analysts and admins to download filtered profile segments as structured CSV data.
+- **CSV Upload**: Admin-only endpoint (`POST /api/profiles/upload`) for bulk profile ingestion with streaming, validation, and detailed feedback.
 
 ---
 
@@ -48,6 +51,68 @@ The parsing works by looking for specific keywords and regex patterns in the use
    - **"above X"**, **"under X"**, **"between X and Y"**: Parses direct numerical ranges.
 3. **Country / Origin:**
    - Detects patterns like `from [Country Name]` or `in [Country Name]` and maps them to standard ISO-2 Codes.
+
+---
+
+## Stage 4B – System Optimization & Data Ingestion
+
+Stage 4B focuses on performance optimization and scalable data ingestion for a system under pressure (1M+ records, high query volume).
+
+### 1. Query Performance Optimization
+
+**MongoDB Indexes** added for common query patterns:
+- `{ gender: 1, age: 1 }` - Gender + age filtering
+- `{ country_id: 1, age: 1 }` - Country + age filtering  
+- `{ age_group: 1, gender: 1 }` - Age group + gender filtering
+- `{ gender: 1, country_id: 1 }` - Gender + country filtering
+- `{ age: 1 }` - Age-based queries
+- `{ name: 1 }` (unique) - Idempotency check for ingestion
+
+**In-Memory Cache** (`CacheService`):
+- 5-minute TTL cache for query results
+- Reduces redundant database calls for repeated queries
+- Justification: Read-heavy workload with repeated queries; single-instance deployment
+
+### 2. Query Normalization
+
+**QueryNormalizerService** ensures semantically identical queries produce the same cache key:
+- "Nigerian females between ages 20 and 45" and "Women aged 20–45 living in Nigeria" → same cache key
+- Normalizes: lowercase genders, uppercase country codes, sorted keys, consistent numeric representation
+- Deterministic, no AI/LLMs used
+
+### 3. CSV Data Ingestion
+
+**Endpoint:** `POST /api/profiles/upload` (admin only)
+
+**Features:**
+- Streaming processing with `csv-parser` (no full file in memory)
+- Chunked inserts (1000 rows/chunk) for efficiency
+- Concurrent upload support without blocking reads
+- Partial failure handling: successful rows remain inserted
+
+**Validation & Skipping:**
+- Missing required fields → skipped
+- Invalid age (negative, >150) → skipped  
+- Invalid gender (not male/female/unknown) → skipped
+- Duplicate name (idempotency) → skipped
+- Malformed rows → skipped
+
+**Response Format:**
+```json
+{
+  "status": "success",
+  "total_rows": 50000,
+  "inserted": 48231,
+  "skipped": 1769,
+  "reasons": {
+    "duplicate_name": 1203,
+    "invalid_age": 312,
+    "missing_fields": 254
+  }
+}
+```
+
+**Justification:** Streaming prevents memory overload with 500K-row files; chunked inserts reduce database pressure; partial failure handling ensures system resilience.
 
 ---
 
