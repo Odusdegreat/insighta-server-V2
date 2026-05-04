@@ -60,8 +60,9 @@ export default async (req: any, res: any) => {
 // Local Environment execution
 if (!process.env.VERCEL) {
   bootstrap().then((server) => {
-    server.listen(process.env.PORT || 3000, () => {
-      console.log('App listening on port 3000 locally');
+    const port = process.env.PORT || 5000;
+    server.listen(port, () => {
+      console.log(`App listening on port ${port} locally`);
     });
   });
 }

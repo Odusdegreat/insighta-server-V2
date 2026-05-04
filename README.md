@@ -2,6 +2,8 @@
 
 This repository contains the backend for the Insighta Labs demographic intelligence project. In Stage 3, the Profile Intelligence Service has been upgraded into a fully secure, multi-interface platform supporting both web browsers and CLI tools.
 
+**Database:** MongoDB with Mongoose ODM (migrated from PostgreSQL/TypeORM)
+
 ## Key Features & Stage 3 Updates
 
 ### 1. Unified Authentication (OAuth + PKCE)
@@ -68,13 +70,15 @@ insighta --help
 
 1. Rename `.env.example` to `.env` (or create a `.env` file) and fill in the values:
    ```env
+   MONGO_URI=mongodb+srv://user:pass@cluster.mongodb.net/database
    GITHUB_CLIENT_ID=your_github_client_id
    GITHUB_CLIENT_SECRET=your_github_client_secret
    JWT_SECRET=your_super_secret_jwt_key
    BACKEND_URL=http://localhost:3000
    WEB_PORTAL_URL=http://localhost:3001
    NODE_ENV=development
+   PORT=5000
    ```
 2. Run `npm install`
 3. Run `npm run start:dev`
-4. Visit `http://localhost:3000/api/docs` to view the comprehensive, interactive Swagger documentation.
+4. Visit `http://localhost:5000/api/docs` to view the comprehensive, interactive Swagger documentation.
